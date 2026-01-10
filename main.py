@@ -1,6 +1,5 @@
 import os
 import io
-import json
 from typing import Optional
 
 from fastapi import FastAPI, UploadFile, File
@@ -12,43 +11,43 @@ from groq import Groq
 from PIL import Image
 import pytesseract
 
-# -------------------------
-# App setup
-# -------------------------
+# =========================
+# App Setup
+# =========================
 
 app = FastAPI(title="Companion AI Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten later
+    allow_origins=["*"],  # tighten later for production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# -------------------------
-# Groq client
-# -------------------------
+# =========================
+# Groq Client
+# =========================
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
-    raise RuntimeError("GROQ_API_KEY not set")
+    raise RuntimeError("GROQ_API_KEY environment variable not set")
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-# -------------------------
-# In-memory persona state
-# (later replace with DB)
-# -------------------------
+# =========================
+# In-Memory Persona State
+# (Session-level for now)
+# =========================
 
 ACTIVE_PERSONA = {
     "name": None,
     "rules": None,
 }
 
-# -------------------------
+# =========================
 # Models
-# -------------------------
+# =========================
 
 class ChatRequest(BaseModel):
     message: str
@@ -59,9 +58,9 @@ class PersonaTextRequest(BaseModel):
     name: Optional[str] = None
 
 
-# -------------------------
-# Health check (IMPORTANT)
-# -------------------------
+# =========================
+# Health Check (IMPORTANT)
+# =========================
 
 @app.get("/health")
 def health():
@@ -72,9 +71,9 @@ def health():
     }
 
 
-# -------------------------
-# Persona from text
-# -------------------------
+# =========================
+# Persona from Text
+# =========================
 
 @app.post("/persona/extract")
 def extract_persona(data: PersonaTextRequest):
@@ -87,9 +86,9 @@ def extract_persona(data: PersonaTextRequest):
     }
 
 
-# -------------------------
-# Persona from image (OCR)
-# -------------------------
+# =========================
+# Persona from Image (OCR)
+# =========================
 
 @app.post("/persona/from-image")
 async def persona_from_image(file: UploadFile = File(...)):
@@ -113,9 +112,9 @@ async def persona_from_image(file: UploadFile = File(...)):
     }
 
 
-# -------------------------
-# Chat (streaming)
-# -------------------------
+# =========================
+# Chat (Streaming AI)
+# =========================
 
 @app.post("/chat")
 def chat(data: ChatRequest):
@@ -140,7 +139,7 @@ Never break character.
 
     def stream():
         completion = groq_client.chat.completions.create(
-            model="llama3-70b-8192",
+            model="llama-3.1-70b-versatile",  # ✅ supported model
             messages=messages,
             temperature=0.7,
             stream=True,
