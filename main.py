@@ -19,7 +19,7 @@ app = FastAPI(title="Companion AI Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten later for production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -37,7 +37,6 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 
 # =========================
 # In-Memory Persona State
-# (Session-level for now)
 # =========================
 
 ACTIVE_PERSONA = {
@@ -59,7 +58,7 @@ class PersonaTextRequest(BaseModel):
 
 
 # =========================
-# Health Check (IMPORTANT)
+# Health Check
 # =========================
 
 @app.get("/health")
@@ -113,7 +112,7 @@ async def persona_from_image(file: UploadFile = File(...)):
 
 
 # =========================
-# Chat (Streaming AI)
+# Chat (Streaming)
 # =========================
 
 @app.post("/chat")
@@ -139,7 +138,7 @@ Never break character.
 
     def stream():
         completion = groq_client.chat.completions.create(
-            model="llama-3.1-70b-versatile",  # ✅ supported model
+            model="llama-3.1-8b-instant",  # ✅ STABLE MODEL
             messages=messages,
             temperature=0.7,
             stream=True,
