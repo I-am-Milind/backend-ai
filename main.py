@@ -1,66 +1,56 @@
 import os
-import io
-from typing import Optional
-
 from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-
 from groq import Groq
-from PIL import Image
 import pytesseract
+from PIL import Image
+import io
 
-# =========================
-# App Setup
-# =========================
+# --------------------------------------------------
+# ENV
+# --------------------------------------------------
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
+if not GROQ_API_KEY:
+    raise RuntimeError("GROQ_API_KEY is not set")
+
+client = Groq(api_key=GROQ_API_KEY)
+
+# --------------------------------------------------
+# APP
+# --------------------------------------------------
 app = FastAPI(title="Companion AI Backend")
 
+# --------------------------------------------------
+# CORS (THIS FIXES YOUR ISSUE PERMANENTLY)
+# --------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
+        "https://your-frontend-domain.vercel.app",  # add later
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# =========================
-# Groq Client
-# =========================
-
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-if not GROQ_API_KEY:
-    raise RuntimeError("GROQ_API_KEY environment variable not set")
-
-groq_client = Groq(api_key=GROQ_API_KEY)
-
-# =========================
-# In-Memory Persona State
-# =========================
-
-ACTIVE_PERSONA = {
-    "name": None,
-    "rules": None,
-}
-
-# =========================
-# Models
-# =========================
-
+# --------------------------------------------------
+# MODELS
+# --------------------------------------------------
 class ChatRequest(BaseModel):
     message: str
 
-
-class PersonaTextRequest(BaseModel):
+class PersonaExtractRequest(BaseModel):
     text: str
-    name: Optional[str] = None
+    name: str | None = None
 
-
-# =========================
-# Health Check
-# =========================
-
+# --------------------------------------------------
+# HEALTH CHECK
+# --------------------------------------------------
 @app.get("/health")
 def health():
     return {
@@ -69,84 +59,107 @@ def health():
         "provider": "groq"
     }
 
-
-# =========================
-# Persona from Text
-# =========================
-
-@app.post("/persona/extract")
-def extract_persona(data: PersonaTextRequest):
-    ACTIVE_PERSONA["name"] = data.name or "Persona"
-    ACTIVE_PERSONA["rules"] = data.text.strip()
-
-    return {
-        "created_persona": ACTIVE_PERSONA["name"],
-        "rules": ACTIVE_PERSONA["rules"]
-    }
-
-
-# =========================
-# Persona from Image (OCR)
-# =========================
-
-@app.post("/persona/from-image")
-async def persona_from_image(file: UploadFile = File(...)):
-    image_bytes = await file.read()
-    image = Image.open(io.BytesIO(image_bytes))
-
-    extracted_text = pytesseract.image_to_string(image)
-
-    if not extracted_text.strip():
-        return {
-            "created_persona": None,
-            "extracted_text_preview": ""
-        }
-
-    ACTIVE_PERSONA["name"] = file.filename.split(".")[0] or "Persona"
-    ACTIVE_PERSONA["rules"] = extracted_text.strip()
-
-    return {
-        "created_persona": ACTIVE_PERSONA["name"],
-        "extracted_text_preview": extracted_text[:500]
-    }
-
-
-# =========================
-# Chat (Streaming)
-# =========================
-
+# --------------------------------------------------
+# CHAT ENDPOINT
+# --------------------------------------------------
 @app.post("/chat")
-def chat(data: ChatRequest):
-    user_message = data.message.strip()
-
-    system_prompt = "You are a helpful AI assistant."
-
-    if ACTIVE_PERSONA["rules"]:
-        system_prompt = f"""
-You are role-playing as the following persona.
-STRICTLY follow these rules at all times:
-
-{ACTIVE_PERSONA["rules"]}
-
-Never break character.
-"""
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_message},
-    ]
-
-    def stream():
-        completion = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",  # ✅ STABLE MODEL
-            messages=messages,
+def chat(req: ChatRequest):
+    try:
+        completion = client.chat.completions.create(
+            model="llama-3.2-11b-vision-preview",  # ACTIVE MODEL
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a calm, helpful AI companion."
+                },
+                {
+                    "role": "user",
+                    "content": req.message
+                }
+            ],
             temperature=0.7,
-            stream=True,
+            max_tokens=512,
         )
 
-        for chunk in completion:
-            delta = chunk.choices[0].delta.content
-            if delta:
-                yield delta
+        reply = completion.choices[0].message.content
+        return reply
 
-    return StreamingResponse(stream(), media_type="text/plain")
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
+
+# --------------------------------------------------
+# PERSONA FROM TEXT
+# --------------------------------------------------
+@app.post("/persona/extract")
+def extract_persona(req: PersonaExtractRequest):
+    try:
+        prompt = f"""
+Extract personality traits, tone, and preferences from this text.
+Return a short persona description.
+
+Text:
+{req.text}
+"""
+
+        completion = client.chat.completions.create(
+            model="llama-3.2-11b-vision-preview",
+            messages=[
+                {"role": "system", "content": "You extract personas from text."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.4,
+            max_tokens=300
+        )
+
+        persona = completion.choices[0].message.content
+
+        return {
+            "created_persona": req.name or "Unknown",
+            "persona": persona
+        }
+
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+# --------------------------------------------------
+# PERSONA FROM IMAGE (SCREENSHOT OCR)
+# --------------------------------------------------
+@app.post("/persona/from-image")
+async def persona_from_image(file: UploadFile = File(...)):
+    try:
+        image_bytes = await file.read()
+        image = Image.open(io.BytesIO(image_bytes))
+
+        extracted_text = pytesseract.image_to_string(image)
+
+        prompt = f"""
+Analyze this chat screenshot text and extract personality,
+tone, habits, emotional style.
+
+Text:
+{extracted_text}
+"""
+
+        completion = client.chat.completions.create(
+            model="llama-3.2-11b-vision-preview",
+            messages=[
+                {"role": "system", "content": "You extract personas from chat logs."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.4,
+            max_tokens=400
+        )
+
+        persona = completion.choices[0].message.content
+
+        return {
+            "created_persona": "From Image",
+            "extracted_text_preview": extracted_text[:500],
+            "persona": persona
+        }
+
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
