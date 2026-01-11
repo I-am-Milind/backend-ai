@@ -1,7 +1,8 @@
 fastapi
 uvicorn
 groq
-python-multipart
+requests
 pillow
 pytesseract
-
+chromadb
+sentence-transformers
