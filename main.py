@@ -1,72 +1,152 @@
 import os
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from groq import Groq
+import io
+from typing import Optional
 
-# -----------------------
-# App setup
-# -----------------------
-app = FastAPI()
+from fastapi import FastAPI, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+
+from groq import Groq
+from PIL import Image
+import pytesseract
+
+# =========================
+# App Setup
+# =========================
+
+app = FastAPI(title="Companion AI Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # OK for MVP
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# -----------------------
-# Groq client
-# -----------------------
+# =========================
+# Groq Client
+# =========================
+
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
 if not GROQ_API_KEY:
-    raise RuntimeError("GROQ_API_KEY is missing")
+    raise RuntimeError("GROQ_API_KEY environment variable not set")
 
-client = Groq(api_key=GROQ_API_KEY)
+groq_client = Groq(api_key=GROQ_API_KEY)
 
-# -----------------------
+# =========================
+# In-Memory Persona State
+# =========================
+
+ACTIVE_PERSONA = {
+    "name": None,
+    "rules": None,
+}
+
+# =========================
 # Models
-# -----------------------
+# =========================
+
 class ChatRequest(BaseModel):
     message: str
 
-# -----------------------
-# Health check
-# -----------------------
+
+class PersonaTextRequest(BaseModel):
+    text: str
+    name: Optional[str] = None
+
+
+# =========================
+# Health Check
+# =========================
+
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "mode": "cloud",
+        "provider": "groq"
+    }
 
-# -----------------------
-# Chat endpoint
-# -----------------------
-@app.post("/chat")
-def chat(req: ChatRequest):
-    try:
-        response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": "You are a helpful AI companion."},
-                {"role": "user", "content": req.message},
-            ],
-            temperature=0.7,
-            max_tokens=512,
-        )
 
+# =========================
+# Persona from Text
+# =========================
+
+@app.post("/persona/extract")
+def extract_persona(data: PersonaTextRequest):
+    ACTIVE_PERSONA["name"] = data.name or "Persona"
+    ACTIVE_PERSONA["rules"] = data.text.strip()
+
+    return {
+        "created_persona": ACTIVE_PERSONA["name"],
+        "rules": ACTIVE_PERSONA["rules"]
+    }
+
+
+# =========================
+# Persona from Image (OCR)
+# =========================
+
+@app.post("/persona/from-image")
+async def persona_from_image(file: UploadFile = File(...)):
+    image_bytes = await file.read()
+    image = Image.open(io.BytesIO(image_bytes))
+
+    extracted_text = pytesseract.image_to_string(image)
+
+    if not extracted_text.strip():
         return {
-            "reply": response.choices[0].message.content
+            "created_persona": None,
+            "extracted_text_preview": ""
         }
 
-    except Exception as e:
-        # IMPORTANT: return JSON, NOT crash
-        return JSONResponse(
-            status_code=500,
-            content={
-                "error": "AI failed",
-                "detail": str(e)
-            },
+    ACTIVE_PERSONA["name"] = file.filename.split(".")[0] or "Persona"
+    ACTIVE_PERSONA["rules"] = extracted_text.strip()
+
+    return {
+        "created_persona": ACTIVE_PERSONA["name"],
+        "extracted_text_preview": extracted_text[:500]
+    }
+
+
+# =========================
+# Chat (Streaming)
+# =========================
+
+@app.post("/chat")
+def chat(data: ChatRequest):
+    user_message = data.message.strip()
+
+    system_prompt = "You are a helpful AI assistant."
+
+    if ACTIVE_PERSONA["rules"]:
+        system_prompt = f"""
+You are role-playing as the following persona.
+STRICTLY follow these rules at all times:
+
+{ACTIVE_PERSONA["rules"]}
+
+Never break character.
+"""
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message},
+    ]
+
+    def stream():
+        completion = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",  # ✅ STABLE MODEL
+            messages=messages,
+            temperature=0.7,
+            stream=True,
         )
+
+        for chunk in completion:
+            delta = chunk.choices[0].delta.content
+            if delta:
+                yield delta
+
+    return StreamingResponse(stream(), media_type="text/plain")
