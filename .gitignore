@@ -3,3 +3,7 @@ __pycache__/
 uploads/
 .env
 *.sqlite3
+fact_memory.db
+venv/
+__pycache__/
+*.env
