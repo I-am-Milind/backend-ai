@@ -1,6 +1,7 @@
 import os
 import io
-from typing import Optional
+from typing import Optional, List
+from datetime import datetime
 
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
@@ -36,13 +37,19 @@ if not GROQ_API_KEY:
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 # =========================
-# In-Memory Persona State
+# Persona State
 # =========================
 
 ACTIVE_PERSONA = {
     "name": None,
     "rules": None,
 }
+
+# =========================
+# Memory (temporary, RAM)
+# =========================
+
+MEMORY: List[dict] = []
 
 # =========================
 # Models
@@ -55,6 +62,25 @@ class ChatRequest(BaseModel):
 class PersonaTextRequest(BaseModel):
     text: str
     name: Optional[str] = None
+
+# =========================
+# Utilities
+# =========================
+
+def get_facts():
+    """System owned facts (never from AI)"""
+    return {
+        "date": datetime.now().strftime("%B %d, %Y"),
+        "time": datetime.now().strftime("%H:%M"),
+    }
+
+
+def is_fact_question(message: str) -> bool:
+    keywords = [
+        "date", "time", "today", "day",
+        "current", "now"
+    ]
+    return any(k in message.lower() for k in keywords)
 
 
 # =========================
@@ -69,7 +95,6 @@ def health():
         "provider": "groq"
     }
 
-
 # =========================
 # Persona from Text
 # =========================
@@ -83,7 +108,6 @@ def extract_persona(data: PersonaTextRequest):
         "created_persona": ACTIVE_PERSONA["name"],
         "rules": ACTIVE_PERSONA["rules"]
     }
-
 
 # =========================
 # Persona from Image (OCR)
@@ -110,25 +134,57 @@ async def persona_from_image(file: UploadFile = File(...)):
         "extracted_text_preview": extracted_text[:500]
     }
 
-
 # =========================
-# Chat (Streaming)
+# Chat Endpoint (SAFE)
 # =========================
 
 @app.post("/chat")
 def chat(data: ChatRequest):
     user_message = data.message.strip()
+    facts = get_facts()
 
-    system_prompt = "You are a helpful AI assistant."
+    # 🔒 FACT QUESTIONS (NO AI)
+    if is_fact_question(user_message):
+        if "date" in user_message.lower() or "today" in user_message.lower():
+            return StreamingResponse(
+                iter([f"Today's date is {facts['date']}"]),
+                media_type="text/plain"
+            )
+        if "time" in user_message.lower():
+            return StreamingResponse(
+                iter([f"The current time is {facts['time']}"]),
+                media_type="text/plain"
+            )
+
+    # =========================
+    # SYSTEM PROMPT (STRONG)
+    # =========================
+
+    system_prompt = f"""
+You are an AI persona.
+
+ABSOLUTE RULES:
+- You are NOT a language model
+- You NEVER mention training data
+- You NEVER explain AI limitations
+- You NEVER apologize for being an AI
+- You NEVER guess facts
+
+SYSTEM FACTS (TRUST THESE ONLY):
+- Today's date is {facts['date']}
+- Current time is {facts['time']}
+
+If you are unsure, say:
+"I don’t have verified information for that yet."
+
+"""
 
     if ACTIVE_PERSONA["rules"]:
-        system_prompt = f"""
-You are role-playing as the following persona.
-STRICTLY follow these rules at all times:
-
+        system_prompt += f"""
+PERSONA RULES (MANDATORY):
 {ACTIVE_PERSONA["rules"]}
 
-Never break character.
+NEVER break character.
 """
 
     messages = [
@@ -136,17 +192,31 @@ Never break character.
         {"role": "user", "content": user_message},
     ]
 
+    # =========================
+    # STREAM RESPONSE
+    # =========================
+
     def stream():
         completion = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",  # ✅ STABLE MODEL
+            model="llama-3.1-8b-instant",
             messages=messages,
-            temperature=0.7,
+            temperature=0.6,
             stream=True,
         )
+
+        full_reply = ""
 
         for chunk in completion:
             delta = chunk.choices[0].delta.content
             if delta:
+                full_reply += delta
                 yield delta
+
+        # 🧠 STORE MEMORY
+        MEMORY.append({
+            "user": user_message,
+            "ai": full_reply,
+            "timestamp": facts["date"]
+        })
 
     return StreamingResponse(stream(), media_type="text/plain")
